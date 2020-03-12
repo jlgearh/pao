@@ -20,7 +20,9 @@ from pyomo.core import Block, VarList, ConstraintList, Objective,\
 from pyomo.repn import generate_standard_repn
 from pyomo.mpec import ComplementarityList, complements
 from .transform import BaseBilevelTransformation
+import logging
 
+logger = logging.getLogger(__name__)
 
 def create_submodel_kkt_block(instance, submodel, deterministic, fixed_upper_vars):
     """
@@ -52,8 +54,8 @@ def create_submodel_kkt_block(instance, submodel, deterministic, fixed_upper_var
     sids_list = []
     #
     block = Block(concrete=True)
-    block.u = VarList()
-    block.v = VarList()
+    block.u = VarList() # Note: Dual variables associated to bounds in primal problem
+    block.v = VarList() # Note: Dual variables associated to constraints in primal problem
     block.c1 = ConstraintList()
     block.c2 = ComplementarityList()
     block.c3 = ComplementarityList()
@@ -267,9 +269,6 @@ quadratic terms where both variables are in the lower level.")
             # TODO: Annotate the model as unbounded
             raise IOError("Unbounded variable without side constraints")
         block.c1.add(exp == 0)
-    #
-    # Return block
-    #
     return block
 
 
@@ -286,24 +285,38 @@ class LinearComplementarityBilevelTransformation(BaseBilevelTransformation):
     def _apply_to(self, model, **kwds):
         deterministic = kwds.pop('deterministic', False)
         submodel_name = kwds.pop('submodel', None)
+
         #
         # Process options
         #
-        submodel = self._preprocess('pao.bilevel.linear_mpec', model, sub=submodel_name)
-        model.reclassify_component_type(submodel, Block)
-        #
-        # Create a block with optimality conditions
-        #
-        setattr(model, self._submodel+'_kkt',
-                create_submodel_kkt_block(model, submodel, deterministic,
-                                          self._fixed_vardata))
-        model._transformation_data['pao.bilevel.linear_mpec'].submodel_cuid =\
-            ComponentUID(submodel)
-        model._transformation_data['pao.bilevel.linear_mpec'].block_cuid =\
-            ComponentUID(getattr(model, self._submodel+'_kkt'))
-        #
-        # Disable the original submodel and
-        #
-        for data in submodel.component_map(active=True).values():
-            if not isinstance(data, Var) and not isinstance(data, Set):
-                data.deactivate()
+        self._preprocess('pao.bilevel.linear_mpec', model)
+
+        def _sub_transformation(model, sub, key):
+            model.reclassify_component_type(sub, Block)
+            #
+            # Create a block with optimality conditions
+            #
+            setattr(model, key +'_kkt',
+                    create_submodel_kkt_block(model, sub, deterministic,
+                                              self.fixed_vardata[key]))
+            model._transformation_data['pao.bilevel.linear_mpec'].submodel_cuid =\
+                ComponentUID(sub)
+            model._transformation_data['pao.bilevel.linear_mpec'].block_cuid =\
+                ComponentUID(getattr(model, key +'_kkt'))
+            #
+            # Disable the original submodel and
+            #
+            for data in sub.component_map(active=True).values():
+                if not isinstance(data, Var) and not isinstance(data, Set):
+                    data.deactivate()
+
+        if not submodel_name is None:
+            lookup = {value: key for key, value in self.submodel}
+            sub = getattr(model,submodel_name)
+            if sub:
+                _sub_transformation(model, sub, lookup[sub])
+            return
+
+        for key, sub in self.submodel.items():
+            _sub_transformation(model, sub, key)
+
